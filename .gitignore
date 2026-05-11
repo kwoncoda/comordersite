@@ -1,0 +1,44 @@
+# Node
+node_modules/
+.npm/
+
+# Env (절대 커밋 X — PIN·SESSION_SECRET 포함)
+.env
+.env.local
+*.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test / coverage
+coverage/
+.vitest/
+playwright-report/
+test-results/
+
+# Build output
+public/css/output.css
+
+# Runtime data (Docker volume 또는 로컬)
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+sessions.sqlite
+
+# Claude Code 메타데이터
+.claude/
+
+# 원본 zip (이미 docs/design-bundle/에 풀려 있음)
+comorder.zip

@@ -1,0 +1,632 @@
+# DB 초안 — 오늘 저녁은 치킨이닭!
+
+**작성일:** 2026-05-04 (`/plan-eng-review` 1차)
+**관련 문서:** `ARCHITECTURE.md` §3·§5, `API_DRAFT.md`, `DECISIONS.md`
+**상태:** DRAFT
+**DB:** SQLite 3.x (better-sqlite3, WAL 모드)
+
+---
+
+## 0. 원칙
+
+1. **SQLite + WAL 모드** — `PRAGMA journal_mode=WAL`로 동시 읽기 허용. 30 동시 사용자 + 5-10 관리자 환경에 적합.
+2. **Raw SQL only** — ORM 미사용. `db/repositories/*.js`가 prepared statement로 쿼리 실행.
+3. **마이그레이션 = 정렬된 SQL 파일** — `db/migrations/NNN-name.sql`을 부팅 시 `_migrations` 테이블 검사 후 미적용분 순차 실행.
+4. **PII 컬럼 명시** — 학번·이름·이체정보·은행·테이블 번호·외부인 토큰. 정산 후 N일 자동 삭제 정책 대상 (ADR-019, ADR-021).
+5. **금액은 정수(원)** — Float 미사용. 결제 정확도 보장.
+6. **시각은 UTC ISO 8601 + business_date 별도 컬럼** — 일자 기준 집계는 `business_date`로 (KST 기준 마감 가변, ADR-014, ADR-018).
+7. **외래 키 강제** — `PRAGMA foreign_keys=ON` 부팅 시 설정.
+
+---
+
+## 1. ER 다이어그램
+
+```
+┌─────────────────┐         ┌─────────────────┐
+│ menu_categories │◀────────│      menus      │
+│─────────────────│         │─────────────────│
+│ id (PK)         │         │ id (PK)         │
+│ name            │         │ category_id (FK)│
+│ display_order   │         │ name            │
+└─────────────────┘         │ price (INT)     │
+                            │ image_url?      │
+                            │ is_recommended  │
+                            │ is_sold_out     │
+                            │ deleted_at?     │
+                            │ created_at      │
+                            │ updated_at      │
+                            └────────┬────────┘
+                                     │
+                                     │
+┌─────────────────┐         ┌────────▼────────┐         ┌──────────────────┐
+│ used_coupons    │         │      orders     │────────▶│   order_items    │
+│─────────────────│         │─────────────────│         │──────────────────│
+│ id (PK)         │         │ id (PK)         │         │ id (PK)          │
+│ student_id (UQ) │         │ order_no        │         │ order_id (FK)    │
+│ name            │         │ business_date   │         │ menu_id (FK)     │
+│ order_id (FK)   │────────▶│ status          │         │ menu_name_snap   │
+│ used_at         │         │ student_id?     │         │ unit_price_snap  │
+│ discount        │         │ customer_name   │         │ qty              │
+└─────────────────┘         │ is_external     │         │ line_total       │
+                            │ external_token? │         └──────────────────┘
+                            │ token_expires_at│
+                            │ pickup_method   │
+                            │ table_no?       │         ┌──────────────────┐
+                            │ subtotal        │         │ rejected_coupons │
+                            │ discount        │         │──────────────────│
+                            │ total           │         │ id (PK)          │
+                            │ transfer_bank?  │         │ student_id?      │
+                            │ transfer_alt_   │         │ name?            │
+                            │   name?         │         │ reason           │
+                            │ transfer_at?    │         │ ip               │
+                            │ paid_at?        │         │ attempted_at     │
+                            │ cooking_at?     │         └──────────────────┘
+                            │ ready_at?       │
+                            │ done_at?        │         ┌──────────────────┐
+                            │ canceled_at?    │         │ admins           │
+                            │ cancel_reason?  │         │──────────────────│
+                            │ created_at      │         │ id (PK)          │
+                            │ updated_at      │         │ username (UQ)    │
+                            └────────┬────────┘         │ pin_hash         │
+                                     │                   │ role             │
+                                     │                   │ created_at       │
+                            ┌────────▼────────┐         └──────────────────┘
+                            │ order_events    │
+                            │─────────────────│         ┌──────────────────┐
+                            │ id (PK)         │         │ admin_sessions   │
+                            │ order_id (FK)   │         │  (connect-       │
+                            │ event_type      │         │   sqlite3)       │
+                            │ from_status?    │         │──────────────────│
+                            │ to_status?      │         │ sid (PK)         │
+                            │ note?           │         │ data             │
+                            │ actor           │         │ expires_at       │
+                            │ created_at      │         └──────────────────┘
+                            └─────────────────┘
+
+┌──────────────────────┐                      ┌──────────────────────┐
+│ settlement_snapshots │                      │ backup_downloads     │
+│──────────────────────│                      │──────────────────────│
+│ id (PK)              │                      │ id (PK)              │
+│ business_date (UQ)   │                      │ business_date        │
+│ closed_at            │                      │ filename             │
+│ closed_by_admin_id   │                      │ source ('manual'/    │
+│ summary_json         │                      │  'auto')             │
+│ deposit_total?       │                      │ size_bytes           │
+│ deposit_diff?        │                      │ downloaded_by?       │
+│ deposit_input_at?    │                      │ created_at           │
+└──────────────────────┘                      └──────────────────────┘
+
+┌──────────────────────┐
+│ _migrations          │
+│──────────────────────│
+│ filename (PK)        │
+│ applied_at           │
+└──────────────────────┘
+```
+
+---
+
+## 2. 테이블 정의 (CREATE TABLE)
+
+### 2.1 `menu_categories`
+
+```sql
+CREATE TABLE menu_categories (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT NOT NULL,
+  display_order INTEGER NOT NULL DEFAULT 0
+);
+
+INSERT INTO menu_categories (id, name, display_order) VALUES
+  (1, '치킨',   10),
+  (2, '사이드', 20),
+  (3, '음료',   30);
+```
+
+### 2.2 `menus`
+
+```sql
+CREATE TABLE menus (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  category_id     INTEGER NOT NULL REFERENCES menu_categories(id),
+  name            TEXT NOT NULL,
+  price           INTEGER NOT NULL CHECK (price >= 0),       -- 원 단위
+  image_url       TEXT,
+  fallback_emoji  TEXT,
+  is_recommended  INTEGER NOT NULL DEFAULT 0 CHECK (is_recommended IN (0,1)),
+  is_sold_out     INTEGER NOT NULL DEFAULT 0 CHECK (is_sold_out IN (0,1)),
+  display_order   INTEGER NOT NULL DEFAULT 0,
+  deleted_at      TEXT,                                       -- soft delete
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_menus_category ON menus(category_id) WHERE deleted_at IS NULL;
+```
+
+> SQLite는 BOOLEAN 미지원이라 `INTEGER + CHECK (... IN (0,1))` 패턴.
+> `image_url`은 `/images/menus/<filename>.png` 형식 또는 NULL → fallback_emoji 사용.
+
+### 2.3 `orders` ★ 핵심 테이블
+
+```sql
+CREATE TABLE orders (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_no            INTEGER NOT NULL,                       -- 일자별 1부터 (ADR-018)
+  business_date       TEXT NOT NULL,                          -- YYYY-MM-DD (KST 기준 운영 일자)
+  status              TEXT NOT NULL CHECK (status IN
+    ('ORDERED','TRANSFER_REPORTED','PAID','COOKING','READY','DONE','CANCELED','HOLD')),
+
+  -- 주문자 정보 (ADR-021)
+  student_id          TEXT,                                   -- 9자리 숫자, 외부인은 NULL
+  customer_name       TEXT NOT NULL,
+  is_external         INTEGER NOT NULL DEFAULT 0 CHECK (is_external IN (0,1)),
+  external_token      TEXT,                                   -- 외부인만 (ADR-021)
+  token_expires_at    TEXT,
+
+  -- 수령
+  pickup_method       TEXT NOT NULL CHECK (pickup_method IN ('dine_in','takeout')),
+  table_no            INTEGER,
+
+  -- 금액 (ADR-020 서버 계산)
+  subtotal            INTEGER NOT NULL CHECK (subtotal >= 0),
+  discount            INTEGER NOT NULL DEFAULT 0 CHECK (discount >= 0),
+  total               INTEGER NOT NULL CHECK (total >= 0),
+
+  -- 이체 정보
+  transfer_bank       TEXT,
+  transfer_alt_name   TEXT,                                   -- 다른 이름으로 이체 시
+  transfer_at         TEXT,
+
+  -- 상태별 타임스탬프
+  paid_at             TEXT,
+  cooking_at          TEXT,
+  ready_at            TEXT,
+  done_at             TEXT,
+  canceled_at         TEXT,
+  hold_at             TEXT,
+  hold_reason         TEXT,
+  cancel_reason       TEXT,
+
+  created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+
+  -- 데이터 무결성
+  UNIQUE (business_date, order_no),
+  CHECK (
+    (is_external = 0 AND student_id IS NOT NULL) OR
+    (is_external = 1 AND student_id IS NULL AND external_token IS NOT NULL)
+  ),
+  CHECK (subtotal - discount = total)
+);
+
+CREATE INDEX idx_orders_business_status ON orders(business_date, status);
+CREATE INDEX idx_orders_student         ON orders(student_id) WHERE student_id IS NOT NULL;
+CREATE INDEX idx_orders_external_token  ON orders(external_token) WHERE external_token IS NOT NULL;
+CREATE INDEX idx_orders_status_updated  ON orders(status, updated_at);  -- 5/10분 경고용
+```
+
+**핵심 제약:**
+- `(business_date, order_no)` UNIQUE — 일자별 리셋 (ADR-018) 안전 보장.
+- `CHECK is_external` — 외부인은 student_id NULL + token 필수. 학생은 student_id 필수 + token NULL.
+- `CHECK subtotal - discount = total` — DB 레벨 무결성 (ADR-020 서버 계산 검증을 DB가 이중 가드).
+
+**`order_no` 발급 전략:**
+```sql
+-- 트랜잭션 내부:
+INSERT INTO orders (business_date, order_no, ...)
+VALUES (
+  ?,
+  COALESCE((SELECT MAX(order_no) FROM orders WHERE business_date = ?), 0) + 1,
+  ...
+);
+```
+WAL + 트랜잭션 + UNIQUE 제약으로 race 없음.
+
+### 2.4 `order_items`
+
+```sql
+CREATE TABLE order_items (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id          INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  menu_id           INTEGER NOT NULL REFERENCES menus(id),
+  menu_name_snap    TEXT NOT NULL,                  -- 주문 시점 메뉴명 (사후 변경 방어)
+  unit_price_snap   INTEGER NOT NULL CHECK (unit_price_snap >= 0),
+  qty               INTEGER NOT NULL CHECK (qty >= 1 AND qty <= 20),
+  line_total        INTEGER NOT NULL CHECK (line_total >= 0),
+
+  CHECK (unit_price_snap * qty = line_total)
+);
+
+CREATE INDEX idx_order_items_order ON order_items(order_id);
+CREATE INDEX idx_order_items_menu  ON order_items(menu_id);
+```
+
+> **스냅샷 컬럼 근거:** 주문 시점 메뉴명/가격을 저장. 운영 중 메뉴 변경 시에도 정산이 안전. ADR-020 server-calc 결과를 DB에 보관.
+
+### 2.5 `used_coupons` ★ ADR-019 + ADR-021
+
+```sql
+CREATE TABLE used_coupons (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  student_id  TEXT NOT NULL UNIQUE,                 -- 학번당 1회 (축제 전체)
+  name        TEXT NOT NULL,
+  order_id    INTEGER NOT NULL REFERENCES orders(id),
+  discount    INTEGER NOT NULL,
+  used_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_used_coupons_used_at ON used_coupons(used_at);
+```
+
+**UNIQUE student_id**가 race condition 자체를 막음 (ADR-019).
+
+### 2.6 `rejected_coupons`
+
+```sql
+CREATE TABLE rejected_coupons (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  student_id    TEXT,
+  name          TEXT,
+  reason        TEXT NOT NULL CHECK (reason IN ('format','prefix','name','duplicate','rate_limit')),
+  ip            TEXT,
+  attempted_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_rejected_attempted ON rejected_coupons(attempted_at);
+CREATE INDEX idx_rejected_ip_time   ON rejected_coupons(ip, attempted_at);  -- rate-limit 조회용
+```
+
+운영 가이드: 정산 후 N일 보관 (학생증 대조 가능), 그 후 폐기.
+
+### 2.7 `order_events` (감사·디버깅·인계)
+
+```sql
+CREATE TABLE order_events (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id    INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  event_type  TEXT NOT NULL,                        -- 'created','transition','transfer_reported','hold','cancel'
+  from_status TEXT,
+  to_status   TEXT,
+  note        TEXT,                                 -- HOLD 사유, 취소 사유 등
+  actor       TEXT NOT NULL,                        -- 'customer:202637042' / 'admin:hub' / 'system'
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_order_events_order ON order_events(order_id);
+CREATE INDEX idx_order_events_time  ON order_events(created_at);
+```
+
+> **선택 사항:** MVP에 필수는 아니지만, 인수인계·디버깅 가치가 큼. 매 상태 변경마다 1행 INSERT (저비용).
+
+### 2.8 `admins`
+
+```sql
+CREATE TABLE admins (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  username    TEXT NOT NULL UNIQUE,
+  pin_hash    TEXT NOT NULL,                        -- argon2id 또는 scrypt
+  role        TEXT NOT NULL DEFAULT 'admin',        -- MVP는 'admin' 단일
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  last_login  TEXT
+);
+```
+
+운영 시 `node scripts/admin-add.js admin <pin>` 같은 CLI로 등록 (Phase 2면 관리자 UI에 'PIN 변경' 추가).
+
+### 2.9 `admin_sessions` (`connect-sqlite3`가 자동 생성)
+
+```sql
+-- 라이브러리가 자동 생성하지만 참고용:
+CREATE TABLE admin_sessions (
+  sid         TEXT PRIMARY KEY,
+  data        TEXT,
+  expires_at  INTEGER
+);
+```
+
+### 2.10 `settlement_snapshots`
+
+```sql
+CREATE TABLE settlement_snapshots (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  business_date       TEXT NOT NULL UNIQUE,
+  closed_at           TEXT NOT NULL,
+  closed_by_admin_id  INTEGER REFERENCES admins(id),
+  summary_json        TEXT NOT NULL,                -- §12.2 항목들 직렬화
+  deposit_total       INTEGER,
+  deposit_diff        INTEGER,
+  deposit_input_at    TEXT,
+  created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+```
+
+`summary_json` 예시:
+```json
+{
+  "total_orders": 234,
+  "total_canceled": 12,
+  "subtotal_revenue": 1295000,
+  "coupon_discount": 45000,
+  "net_revenue": 1250000,
+  "by_menu": [{"menu_id":1,"name":"후라이드","qty":87,"revenue":783000}],
+  "by_hour": [{"hour":"16","count":8}],
+  "coupons": {"used":23,"rejected_breakdown":{"format":2,"prefix":8}}
+}
+```
+
+> 정산 시점 데이터를 *불변 스냅샷*으로 저장. 사후 메뉴·쿠폰 변경되어도 정산 결과 영향 없음.
+
+### 2.11 `backup_downloads`
+
+```sql
+CREATE TABLE backup_downloads (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  business_date     TEXT NOT NULL,
+  filename          TEXT NOT NULL,
+  source            TEXT NOT NULL CHECK (source IN ('manual','auto')),
+  size_bytes        INTEGER NOT NULL,
+  downloaded_by     INTEGER REFERENCES admins(id),  -- auto는 NULL
+  created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_backup_date_source ON backup_downloads(business_date, source);
+```
+
+§12.5: 누가/언제 받았는지. ADR-022 자동 스냅샷도 동일 테이블에 source='auto'로 기록.
+
+### 2.12 `_migrations`
+
+```sql
+CREATE TABLE _migrations (
+  filename    TEXT PRIMARY KEY,
+  applied_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+```
+
+부팅 시 `db/migrations/*.sql`을 정렬해 미적용분 실행 + 이 테이블에 기록.
+
+---
+
+## 3. 인덱스 전체 목록
+
+| 인덱스 | 용도 |
+|---|---|
+| `idx_menus_category` | 분류별 메뉴 조회, soft delete 제외 |
+| `idx_orders_business_status` | 본부 대시보드 (오늘 + 상태) 핵심 쿼리 |
+| `idx_orders_student` | 학생 조리 현황판 인증 (학번 매칭) |
+| `idx_orders_external_token` | 외부인 조리 현황판 인증 (토큰 매칭) |
+| `idx_orders_status_updated` | 5/10분 경고 (같은 상태 머문 시간) |
+| `idx_order_items_order` | 주문 상세 화면 |
+| `idx_order_items_menu` | 메뉴별 판매 집계 (정산) |
+| `idx_used_coupons_used_at` | 쿠폰 사용 시간순 정렬 |
+| `idx_rejected_attempted` | 거부 로그 시간순 |
+| `idx_rejected_ip_time` | rate-limit IP 조회 |
+| `idx_order_events_order` | 주문 이력 화면 |
+| `idx_order_events_time` | 시간 범위 조회 |
+| `idx_backup_date_source` | 일자별 자동/수동 백업 분리 조회 |
+
+UNIQUE 제약(별도 인덱스 자동 생성):
+- `orders(business_date, order_no)`
+- `used_coupons(student_id)`
+- `admins(username)`
+- `settlement_snapshots(business_date)`
+
+---
+
+## 4. 자주 쓰이는 쿼리 (성능 검증용)
+
+### 4.1 본부 대시보드 (가장 빈번)
+```sql
+SELECT id, order_no, status, customer_name, student_id, total,
+       transfer_bank, transfer_alt_name, transfer_at,
+       (julianday('now') - julianday(updated_at)) * 24 * 60 AS elapsed_minutes
+FROM orders
+WHERE business_date = ?
+  AND status NOT IN ('DONE','CANCELED')
+ORDER BY status, transfer_at NULLS FIRST, created_at;
+```
+인덱스: `idx_orders_business_status` 활용.
+
+### 4.2 사용자 조리 현황판 (학생)
+```sql
+SELECT id, status, order_no, customer_name, total,
+       paid_at, cooking_at, ready_at, done_at, canceled_at, hold_reason
+FROM orders
+WHERE business_date = ?
+  AND order_no = ?
+  AND student_id = ?;
+```
+인덱스: `(business_date, order_no)` UNIQUE 활용.
+
+### 4.3 인기 랭킹 (5분 캐시)
+```sql
+SELECT m.id, m.name, SUM(oi.qty) AS sold_count
+FROM order_items oi
+JOIN orders o ON oi.order_id = o.id
+JOIN menus m ON oi.menu_id = m.id
+WHERE o.business_date = ?
+  AND o.status IN ('PAID','COOKING','READY','DONE')
+GROUP BY m.id, m.name
+ORDER BY sold_count DESC
+LIMIT 3;
+```
+인덱스: `idx_order_items_menu` + `idx_orders_business_status`.
+
+### 4.4 정산 마감 가드 (ADR-012 T3)
+```sql
+SELECT status, COUNT(*) AS cnt
+FROM orders
+WHERE business_date = ?
+  AND status NOT IN ('DONE','CANCELED')
+GROUP BY status;
+```
+결과가 비어있으면 마감 가능.
+
+### 4.5 정산 메뉴별 집계
+```sql
+SELECT m.id, oi.menu_name_snap AS name, SUM(oi.qty) AS qty, SUM(oi.line_total) AS revenue
+FROM order_items oi
+JOIN orders o ON oi.order_id = o.id
+LEFT JOIN menus m ON oi.menu_id = m.id
+WHERE o.business_date = ?
+  AND o.status = 'DONE'
+GROUP BY m.id, oi.menu_name_snap
+ORDER BY revenue DESC;
+```
+
+### 4.6 시간대별 주문량
+```sql
+SELECT strftime('%H', created_at, 'localtime') AS hour, COUNT(*) AS cnt
+FROM orders
+WHERE business_date = ?
+  AND status = 'DONE'
+GROUP BY hour
+ORDER BY hour;
+```
+
+---
+
+## 5. 마이그레이션 전략
+
+### 5.1 파일 구조
+
+```
+db/migrations/
+├── 001-init.sql            # 모든 테이블 + 인덱스 + 초기 카테고리 데이터
+├── 002-?                   # 1차 운영 후 변경 시 추가
+└── ...
+```
+
+### 5.2 부팅 시 적용
+
+```javascript
+// db/connection.js (의사코드)
+function runMigrations(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS _migrations (
+    filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  const files = fs.readdirSync('db/migrations').filter(f => f.endsWith('.sql')).sort();
+  const applied = new Set(db.prepare('SELECT filename FROM _migrations').all().map(r => r.filename));
+  for (const f of files) {
+    if (applied.has(f)) continue;
+    const sql = fs.readFileSync(`db/migrations/${f}`, 'utf-8');
+    db.exec('BEGIN');
+    try {
+      db.exec(sql);
+      db.prepare('INSERT INTO _migrations (filename) VALUES (?)').run(f);
+      db.exec('COMMIT');
+      console.log(`[migration] applied ${f}`);
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+  }
+}
+```
+
+### 5.3 PRAGMA 설정
+
+```javascript
+db.pragma('journal_mode = WAL');           // 동시 읽기 최적화
+db.pragma('synchronous = NORMAL');         // WAL+NORMAL이면 충돌 시 마지막 WAL만 손실 (수용)
+db.pragma('foreign_keys = ON');            // FK 강제
+db.pragma('cache_size = -32000');          // 32MB 캐시 (-는 KB 단위)
+db.pragma('busy_timeout = 5000');          // 5초 대기 후 SQLITE_BUSY
+```
+
+### 5.4 1차 운영 변경 정책
+
+운영 중 마이그레이션 권장 안 함. 변경 필요 시:
+1. `docker compose down`
+2. Volume 백업 (`tar`)
+3. `db/migrations/NNN-name.sql` 추가
+4. `docker compose up -d --build` (재가동 시 자동 적용)
+
+> **운영 중 메뉴 가격 변경 금지** (ADR-020 해설). 변경 직후 주문이 새 가격, 직전 주문이 옛 가격 → 정산 혼란.
+
+---
+
+## 6. PII 분류 + 보존 정책
+
+| 컬럼 | PII 등급 | 보존 정책 |
+|---|---|---|
+| `orders.student_id` | 높음 (개인 식별) | 정산 후 N일 (권장 7~14일) 후 NULL 처리 |
+| `orders.customer_name` | 높음 | 동일 |
+| `orders.transfer_bank`, `transfer_alt_name` | 중간 | 동일 |
+| `orders.external_token` | 낮음 (랜덤) | `token_expires_at` 24h 후 NULL 처리 |
+| `orders.table_no` | 낮음 | 보관 |
+| `used_coupons.*` | 높음 | 정산 후 N일 후 행 삭제 |
+| `rejected_coupons.student_id, name, ip` | 높음 | 정산 후 N일 후 행 삭제 |
+| `order_events` | 낮음 | 보관 (인수인계 가치) |
+| `settlement_snapshots.summary_json` | 중간 (집계 PII) | 영구 보관 (학생회 회의 자료) — JSON에 학번/이름은 *집계 후 제외* 권장 |
+| `backups/*.zip` | 높음 | 정산 후 N일 USB 회수·폐기 (운영 가이드) |
+
+**삭제 작업:** `jobs/pii-purge.js`를 정산 마감 + N일 후 1회 실행. 또는 운영진이 `node scripts/purge-pii.js --before=YYYY-MM-DD` 수동 실행 (1차 운영은 수동 권장).
+
+---
+
+## 7. 백업·복구
+
+### 7.1 운영 중 (자동 ZIP, ADR-022)
+- `jobs/auto-snapshot.js`가 30분 주기로 ZIP 생성
+- DB 자체는 백업 안 함 (ZIP 안에 `orders.json`, `coupons.json`, `menu-snapshot.json`이 데이터)
+
+### 7.2 운영 종료 후 (수동 정산 ZIP, §12.5)
+- 정산 화면에서 `GET /admin/api/settlement/:date/zip`으로 다운로드
+- USB·암호화 폴더 보관
+
+### 7.3 호스트 디스크 손상 시
+- Docker volume 외부 사본이 있으면 복원: `docker run --rm -v chickenedak-data:/data -v ${PWD}:/restore alpine tar xzf /restore/backup.tar.gz -C /`
+- 자동 ZIP만 있으면: 수동으로 `orders.json`을 SQL INSERT로 변환해 신규 DB 부팅 (운영 가이드 작성 권장)
+
+### 7.4 무결성 체크
+부팅 시:
+```javascript
+const result = db.pragma('integrity_check', { simple: true });
+if (result !== 'ok') {
+  // pino error 로그 + 알림
+  // 폴백: 마지막 자동 ZIP의 orders.json을 새 DB로 복원
+}
+```
+
+---
+
+## 8. 용량 추산
+
+| 항목 | 값 |
+|---|---|
+| 평균 주문 1건 (orders + items 평균 2개 + events 5개) | ~2 KB |
+| 5/20-21 양일 총 주문 200건 × 2 = 400건 | ~800 KB |
+| 메뉴·카테고리·관리자 등 정적 데이터 | ~50 KB |
+| 인덱스 오버헤드 | ~200 KB |
+| **DB 총 용량 예상** | **< 2 MB** |
+| 자동 ZIP 1개 (이미지 포함) | ~500 KB-1 MB |
+| 자동 ZIP 6개 회전 | ~6 MB max |
+| 메뉴 이미지 10개 × 200KB | ~2 MB |
+| **Docker volume 총 사용량 예상** | **< 15 MB** |
+
+학생회 노트북 디스크에 부담 0.
+
+---
+
+## 9. 변경 영향 추적
+
+| 결정 (ADR) | 영향받은 테이블/컬럼 |
+|---|---|
+| ADR-015 (조리 현황판 SSE) | `orders` 상태 컬럼은 그대로, `external_token` + `token_expires_at` 추가 |
+| ADR-018 (다일 운영) | `(business_date, order_no)` UNIQUE 패턴 |
+| ADR-019 (학번 prefix) | `used_coupons.student_id UNIQUE` (축제 전체 1회) |
+| ADR-020 (Pattern B) | `order_items.unit_price_snap`, CHECK 무결성 |
+| ADR-021 (학번+이름 필수) | `orders.student_id, customer_name, is_external, external_token` |
+| ADR-022 (자동 ZIP) | `backup_downloads.source ('auto')` |
+| ADR-023 (Docker) | volume 마운트 = `/app/data/db.sqlite` |
+
+---
+
+## 10. 미정·후속 검토
+
+- **메뉴 이미지 저장:** 파일 시스템(`/app/data/images/`) vs DB BLOB. **추천: 파일 시스템** (간단·CDN 불필요).
+- **PII purge 자동화:** 1차 운영은 수동, 2차에 자동화 권장.
+- **`order_events` 채택 여부:** MVP 부담이면 Phase 2로 미룸. *추천: MVP 포함* (인수인계 가치 큼, 비용 INSERT 1건/상태변경).
+- **`settlement_snapshots.summary_json` 스키마:** 변경 가능성 있음. JSON 안에 schema_version 필드 권장.
