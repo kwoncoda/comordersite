@@ -243,18 +243,44 @@ ErrorLayout (마스코트 중심)
 | `done` | `--stamp-black` | 주문 상세 "DONE" |
 | `canceled` | `--stamp-red` | 주문 상세 "CANCELED" |
 
-**구현:**
-- SVG 1개로 만들고 `<use>` 재사용
-- 텍스트는 `<text>` 요소 (`font-stencil` 또는 Black weight)
-- 외곽선: `stroke-dasharray` + `feTurbulence` filter
-- 약간 회전: `transform: rotate(N deg)` (각 인스턴스 다른 각도)
+**구현 — *2026-05-13 C 결정: CSS stamp 기본 (SVG 외주 X)***:
+
+```html
+<span class="stamp stamp-recommended" aria-label="추천 메뉴">RECOMMENDED</span>
+```
+
+```css
+.stamp {
+  display: inline-block;
+  padding: 4px 10px;
+  font-family: var(--font-stencil); /* Black Ops One */
+  font-weight: 900;
+  letter-spacing: 0.05em;
+  border: 2px solid currentColor;
+  box-shadow: 2px 2px 0 currentColor;
+  transform: rotate(-3deg);  /* 각 인스턴스마다 -3~+3deg 랜덤 */
+  opacity: 0.92;
+}
+.stamp-recommended { color: var(--stamp-black); }
+.stamp-sold-out    { color: var(--stamp-red); }
+.stamp-paid        { color: var(--stamp-red); }
+.stamp-done        { color: var(--stamp-black); }
+.stamp-canceled    { color: var(--stamp-red); }
+```
+
+**SVG 미사용 근거 (2026-05-13 C 결정):**
+- `feTurbulence` 외곽 거칠기는 *손맛 95%* 정도 보존되면 충분 — CSS `box-shadow` 오프셋 + border로 도장 톤 표현
+- 외주 자산 작업 시간 절감 (~3-5시간)
+- 새 도장 종류 추가 시 코드 한 줄 (예: `.stamp-hold { color: var(--color-warning); }`)
+- 회전 각도는 Alpine.js로 인스턴스마다 다르게 (`x-init="$el.style.setProperty('--rot', `${-3 + Math.random()*6}deg`)"` 등)
 
 **모션:**
 - 등장 시 *도장 찍힘* 애니메이션 (scale 1.4 → 1, opacity 0 → 1, 150ms `--ease-stamp`)
 - 한 번만 (재방문 시 정적 표시)
 
 **접근성:**
-- `<img alt="추천 메뉴">` 또는 `aria-label` 명시
+- `<span aria-label="추천 메뉴">` 명시 (SVG는 `<img alt>`였으나 CSS stamp는 `<span>`)
+- 색상만으로 의미 전달 X — 텍스트 자체가 의미 (SOLD OUT 등)
 
 ---
 
@@ -404,18 +430,24 @@ ErrorLayout (마스코트 중심)
 
 **역할:** 메뉴 1개 카드 (메뉴 목록 화면).
 
-**구조:**
+**구조 — *2026-05-13 G11 PUBG 인벤토리 톤*:**
 ```
 ┌─────────────────────────┐
-│  [이미지 또는 fallback]  │  4:3 비율, 라디우스 8px
+│  [PUBG 아이템 일러스트]  │  4:3 비율, 라디우스 8px
 │                          │  ─ Recommended/Sold-out 도장 (overlay)
+│                          │  ─ 카드 영역만 밝은 흙색 (#C8B894)
 ├─────────────────────────┤
-│ 후라이드 치킨            │  메뉴명 (16px Bold)
+│ 후라이드                 │  메뉴명 (16px Bold, 본명 그대로 — G10)
 │ 18,000원                 │  PriceTag (16px Mono)
 ├─────────────────────────┤
-│ [+ 카트 담기]            │  Button (sm primary 또는 disabled)
+│ [+ 줍기]                 │  Button "줍기" (G11 PUBG 인벤토리 라벨)
 └─────────────────────────┘
 ```
+
+**라벨 변경 (2026-05-13 G11):**
+- "카트 담기" → **"줍기"** (CTA 라벨)
+- "장바구니" (Cart 화면) → **"인벤토리"** (카트 화면 헤더)
+- 메뉴 이름은 *본명 그대로* (G10: 후라이드·양념·뿌링클·감자튀김·뿌링감자튀김·칠리스·콜라·사이다). 이름 리스킨 X.
 
 **상태 변형:**
 | 상태 | 시각 |
@@ -485,7 +517,7 @@ ErrorLayout (마스코트 중심)
 
 ---
 
-### 4.4 `MascotState`
+### 4.4 `MascotState` — *2026-05-13 B 거부 결정으로 5종 유지*
 
 **역할:** 마스코트 5종 변형 표시 (`DESIGN.md` §10.1).
 
@@ -494,12 +526,23 @@ ErrorLayout (마스코트 중심)
 - `size`: `sm (80px) | md (160px) | lg (200px)`
 - `caption`: 카피 텍스트
 
+**자산 정책 (2026-05-13):**
+- 5종 SVG 유지 결정 (축소 후보 B 거부 — 사용자 결정)
+- D-3 (5/17) 미수령 시 **🪖 헬멧 이모지 + 컬러 배경** 5단계 동일 fallback
+- 추후 SVG 수령 시 *런타임 교체* 가능 (이미지 경로만 변경)
+
+**fallback 우선순위:**
+1. SVG 5종 (정상)
+2. SVG 1종 + 다른 4종은 🪖 이모지 (부분 수령)
+3. 전체 🪖 + 컬러 배경 (미수령)
+
 **모션:**
 - 변형 전환: cross-fade 200ms + 살짝 흔들 (rotate ±2°)
 - idle: COOKING 변형만 살짝 흔들 (3초 사이클, ±1°)
 - 다른 상태는 정적
+- `prefers-reduced-motion` 시 모션 X
 
-**사용 위치 + 변형 매핑:** `DESIGN.md` §10.2 표 참조.
+**사용 위치 + 변형 매핑:** `DESIGN.md` §10.2 표 참조 + **C-9 영업 외 안내 (기본 변형)** 추가.
 
 ---
 
@@ -605,6 +648,175 @@ ErrorLayout (마스코트 중심)
 - `downloading` — Spinner + "백업 만드는 중..." (3-30초)
 - `success` — 다운로드 완료 알림 ("USB 보관 잊지 마세요!")
 - `error` — 디스크 부족 등 → 사유 + 재시도
+
+---
+
+### 4.9 `BusinessStateBadge` ★ G13 신규 — *2026-05-13*
+
+**역할:** 본부 대시보드 헤더 영업 상태 표시 배지.
+
+**시각:**
+```
+[🟢 OPEN]   16:30~  admin1 ▼   알림 음 ON
+[🔴 CLOSED] 미가동   admin1 ▼   …
+```
+
+**props:**
+- `status`: `'OPEN' | 'CLOSED'`
+- `operatingDate`: ISO 날짜 (OPEN 시)
+- `shouldBeOpen`: boolean (현재 시각·운영일 기준 영업 *예정*)
+
+**상태 변형:**
+| 상태 | 배지 | 부가 표시 |
+|---|---|---|
+| `OPEN` | 🟢 OPEN | 운영 시작 시각 표시 |
+| `CLOSED` (16:30 이전) | 🔴 CLOSED | "오픈 예정 16:30" |
+| `CLOSED` + shouldBeOpen=true | 🔴 CLOSED + ⚠️ 빨간 깜박 | "장사 시작 누락 — 사용자 대기" |
+
+**접근성:**
+- `aria-live="polite"` — 상태 변경 시 스크린리더 안내
+- 색 + 텍스트 둘 다 (🔴 + "CLOSED")
+
+---
+
+### 4.10 `StartBusinessCTA` ★ G13 신규 — *2026-05-13*
+
+**역할:** 본부 대시보드 상단 큰 형광 옐로 "🚀 장사 시작" CTA. CLOSED 상태일 때만 표시.
+
+**시각 (CLOSED 상태):**
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                                                                    │
+│       ┌─────────────────────────────────────┐                      │
+│       │   🚀  장사 시작                       │ ★ 큰 형광 옐로 CTA  │
+│       │                                     │                      │
+│       │   영업 시작 시각: 16:30 예정          │                      │
+│       │   현재: CLOSED                       │                      │
+│       │                                     │                      │
+│       │   [클릭하면 사용자 주문 시작]         │                      │
+│       └─────────────────────────────────────┘                      │
+│                                                                    │
+│  ⚠️ 16:30 이후 5분+ 지나면 빨간 깜박 알림                            │
+│                                                                    │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+**props:**
+- `disabled`: boolean (OPEN 상태일 때 미표시 — 부모 컴포넌트가 제어)
+- `shouldBeOpen`: boolean (16:30 이후 5분+ 시 빨간 깜박)
+
+**액션:**
+- 클릭 → `POST /admin/api/business/open` (API_DRAFT §2.25)
+- 성공 시 부모 컴포넌트 상태 갱신 → BusinessStateBadge가 🟢 OPEN으로 전환
+- 실패 시 ErrorState 표시
+
+**모션:**
+- 기본 상태: 정적 (사용자 한 손 조작 방해 X)
+- shouldBeOpen=true + status=CLOSED: 빨간 box-shadow 1초 주기 깜박 (`@keyframes urgent-pulse`)
+- 클릭 후: 200ms scale(0.96) → scale(1)
+
+**접근성:**
+- `<button aria-describedby="cta-explanation">` — 부 설명 연결
+- 키보드 Enter·Space 활성화
+- 포커스 링 명확
+
+---
+
+### 4.11 `ClosedScreen` ★ G13 신규 — *2026-05-13 (C-9)*
+
+**역할:** CLOSED 상태에서 사용자 GET 진입 시 풀스크린 영업 외 안내.
+
+**구조 (`SCREEN_STRUCTURE.md` §3.14 참조):**
+```
+┌─────────────────────────────────────┐
+│  🔒                                  │
+│                                     │
+│       영업 시간이 아니에요             │
+│                                     │
+│  [🐻 마스코트 — 기본 변형]            │
+│                                     │
+│  운영 일정:                          │
+│  ━━━━━━━━━━━━━━━                    │
+│  5/20 (수) 16:30 오픈                │
+│  5/21 (목) 16:30 오픈                │
+│                                     │
+│  영업 시작 후 다시 방문해 주세요       │
+│                                     │
+│  [🔄 새로고침]                       │
+└─────────────────────────────────────┘
+```
+
+**props:**
+- `operatingDates`: string[] (예: ['2026-05-20', '2026-05-21'])
+- `businessOpenTime`: string (예: '16:30')
+- `nextOpenAt`: ISO 시각 (현재 시점에서 다음 오픈 시각 — 마지막 운영일 종료 시 null)
+
+**상태 변형:**
+- 16:30 이전 (영업 전): "5/20 16:30 오픈 예정"
+- 16:30 이후 + 관리자 미클릭: "곧 시작합니다"
+- 정산 마감 후: "오늘 영업이 종료되었습니다. 내일 16:30 다시 오픈"
+- 양일 종료 후: "축제가 끝났어요. 다음에 또 만나요!"
+
+**접근성:**
+- `<main>` 시맨틱 + `<h1>` 메시지
+- 마스코트는 `<img alt="치킨이닭 마스코트">`
+- 새로고침은 `<button>` (실제로 `location.reload()`)
+
+**Phase 2 후보:**
+- 영업 시작 시각 카운트다운 ("16:30 OPEN까지 17:32 남음")
+- 친구 카톡 공유 ("부스 영업 시작 알림")
+
+---
+
+### 4.12 `BoothMinimapModal` ★ G12 신규 — *2026-05-13 (C-7)*
+
+**역할:** 부스 약도 + 테이블 번호·위치 + 본인 테이블 강조 풀스크린 모달. 메뉴(C-1)·주문 완료(C-4) 화면 우상단 🗺️ 아이콘 진입.
+
+**구조 (`SCREEN_STRUCTURE.md` §3.13 참조):**
+```
+┌─────────────────────────────────────┐
+│ 🗺️ 부스 미니맵            [×]        │
+├─────────────────────────────────────┤
+│  ┌─────────────────────────────┐   │
+│  │   [부스 약도 이미지 또는    ]   │
+│  │    CSS 그리드 fallback]     │   │
+│  │                            │   │
+│  │  T1   T2   T3   T4         │   │
+│  │  T5   T6  [T7]  T8         │ ★ 본인 테이블
+│  │  T9  T10  T11  T12         │   │
+│  │       [입구 🚪]              │   │
+│  └─────────────────────────────┘   │
+│  내 테이블: #7                       │
+│  수령: 매장 식사                     │
+├─────────────────────────────────────┤
+│ [닫기]                              │
+└─────────────────────────────────────┘
+```
+
+**props:**
+- `myTableNo`: number (선택 — 매장 식사 + 주문 후만)
+- `mapImage`: string URL (선택 — 미수령 시 CSS 그리드 fallback)
+- `gridSize`: {cols: 4, rows: 3} (fallback용)
+
+**렌더링 분기:**
+1. `mapImage` 존재 → `<img src={mapImage}>` + `myTableNo` 위치에 형광 옐로 강조 overlay
+2. `mapImage` 미존재 → CSS 그리드 4×3 (T1~T12) + 입구 마커 + `myTableNo` 박스만 형광 옐로
+
+**모션:**
+- 모달 진입: 200ms fade + 8px slide (`--ease-out`)
+- 본인 테이블 펄스: 1초 주기 idle (scale 1.0 ↔ 1.05)
+- 닫기: X 버튼 / 외부 클릭 / `Esc` 키 3가지
+
+**접근성:**
+- `<dialog>` 시맨틱 (or `role="dialog"`)
+- 모달 진입 시 포커스 트랩
+- Esc로 닫기
+- 닫힘 시 포커스 복귀 (진입 트리거였던 🗺️ 아이콘)
+
+**Fallback 우선순위 (사용자 약도 D-1 미수령 시):**
+- CSS 그리드만으로 작동
+- 본인 테이블 강조는 그래도 작동 (테이블 번호 매칭)
+- D-1 (5/19) 이미지 수령 후 *런타임 교체* (이미지 경로 1줄 변경, 코드 X)
 
 ---
 
@@ -837,11 +1049,33 @@ ErrorLayout (마스코트 중심)
 
 ---
 
-## 9. 미정·후속
+## 9. 미정·후속 — *2026-05-13/14 갱신*
 
 - **컴포넌트 코드 위치:** EJS partial (`views/_partials/`)? Alpine.js 컴포넌트? — 구현 단계 결정.
-- **마스코트 SVG 자산:** 5종 변형 — 디자이너 제작 (사용자 또는 외주). 1차 운영 전 필수.
-- **도장 SVG:** RECOMMENDED·SOLD OUT·PAID·DONE·CANCELED 5종. 1회 제작 후 색·텍스트만 변형.
-- **카모 패턴 SVG:** 헤더 배경용. 10x10 픽셀 블록 패턴.
+- **마스코트 SVG 자산:** 5종 변형 — 디자이너 제작 (사용자 또는 외주). 1차 운영 전 필수. **B 거부 결정 (2026-05-13)으로 유지**. fallback은 🪖 헬멧 이모지.
+- ~~**도장 SVG:** 5종~~ → **✅ CSS stamp 기본 (2026-05-13 C 수용)** — SVG 외주 X. `.stamp` CSS class + 변형 5개로 처리.
+- ~~**카모 패턴 SVG:** 헤더 배경용~~ → **✅ CSS gradient 기본 (2026-05-13 F 수용)** — SVG 외주 X. `linear-gradient` 3색 mix.
 - **알림음 자산:** 본부 대시보드용 (Phase 2).
-- **컴포넌트 카탈로그 페이지** (`/admin/components` 같은 dev 페이지) — 1차 운영 후 인수인계 자산화.
+- **컴포넌트 카탈로그 페이지** (`/admin/components` 같은 dev 페이지) — ~~1차 운영 후 인수인계 자산화~~. **G14 일회성 결정 (2026-05-13)으로 후속 가치 X** — MVP 후 카탈로그 페이지 미도입.
+- **신규 컴포넌트 (2026-05-13 추가):**
+  - `BusinessStateBadge` (§4.9, G13)
+  - `StartBusinessCTA` (§4.10, G13)
+  - `ClosedScreen` (§4.11, G13 — C-9 화면)
+  - `BoothMinimapModal` (§4.12, G12 — C-7 화면)
+- **부스 약도 이미지** (G12 BoothMinimapModal용) — 사용자 직접 제공. D-1 (5/19) 마감. 미수령 시 CSS 그리드 자동 fallback.
+
+---
+
+## 10. 변경 이력 (2026-05-13/14)
+
+| 컴포넌트 | 변경 |
+|---|---|
+| §3.1 StampBadge | SVG `feTurbulence` → CSS stamp 기본 (rotate + Black Ops One + border + box-shadow). 2026-05-13 C 수용 |
+| §4.1 MenuCard | CTA "카트 담기" → "**줍기**" + 카드 배경 흙색(#C8B894) PUBG 인벤토리 톤. G11 |
+| §4.2 CartItem | 화면 헤더 "장바구니" → "**인벤토리**". G11 |
+| §4.4 MascotState | 5종 유지 결정 (B 거부) + fallback 정책 명시. C-9 영업 외 안내 사용처 추가 |
+| §4.9 BusinessStateBadge | 신규 (G13) |
+| §4.10 StartBusinessCTA | 신규 (G13) |
+| §4.11 ClosedScreen | 신규 (G13 C-9 화면) |
+| §4.12 BoothMinimapModal | 신규 (G12 C-7 화면) |
+| §9 미정 → §9·§10 갱신 | 도장·카모 CSS 결정 / 카탈로그 페이지 후속 X (G14) / 신규 4 컴포넌트 명시 |
