@@ -690,15 +690,18 @@ INSERT INTO menu_categories (slug, name, display_order) VALUES
   ('drink',   '음료', 3);
 
 -- 메뉴 8개 고정 (G10) — 가격은 사용자 확정 후 UPDATE 또는 마이그레이션
+-- 메뉴 일러스트는 PUBG 회복 아이템 시각으로 매핑 (G10 + 2026-05-14 결정 b, DESIGN.md §10.5)
+-- 이름은 본명 유지, 일러스트만 PUBG 아이템 시각 (사용자 PUBG 인게임 캡처 D-3 제공)
 INSERT INTO menus (slug, name, category_id, price, is_recommended, is_soldout) VALUES
-  ('fried',           '후라이드',         1, 18000, 1, 0),
-  ('seasoned',        '양념',             1, 19000, 0, 0),
-  ('bbringkle',       '뿌링클',           1, 20000, 1, 0),
-  ('chilis',          '칠리스',           1, 20000, 0, 0),
-  ('fries',           '감자튀김',         2,  4000, 0, 0),
-  ('bbringkle_fries', '뿌링감자튀김',     2,  5000, 0, 0),
-  ('cola',            '콜라',             3,  2000, 0, 0),
-  ('cider',           '사이다',           3,  2000, 0, 0);
+  ('fried',           '후라이드',         1, 18000, 1, 0),  -- 일러스트: 붕대 (Bandage)
+  ('seasoned',        '양념',             1, 19000, 0, 0),  -- 일러스트: 구급상자 (First Aid Kit)
+  ('bbringkle',       '뿌링클',           1, 20000, 1, 0),  -- 일러스트: 의료용 키트 (Medical Kit)
+  ('chilis',          '칠리스',           1, 20000, 0, 0),  -- 일러스트: 아드레날린 주사기
+  ('fries',           '감자튀김',         2,  4000, 0, 0),  -- 일러스트: 응급 지혈 주사 (Adrenaline Syringe)
+  ('bbringkle_fries', '뿌링감자튀김',     2,  5000, 0, 0),  -- 일러스트: 자가제세동기 (Defibrillator)
+  ('cola',            '콜라',             3,  2000, 0, 0),  -- 일러스트: 진통제 (Painkiller)
+  ('cider',           '사이다',           3,  2000, 0, 0);  -- 일러스트: 에너지 드링크 (Energy Drink)
+-- 일러스트 경로: menus.image_url 컬럼 (D-3 수령 시 UPDATE). 미수령 시 fallback (ADR-006 분류 이모지)
 
 -- 영업 상태 단일 행 (G13)
 INSERT INTO business_state (id, status) VALUES (1, 'CLOSED');
