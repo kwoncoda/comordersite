@@ -221,14 +221,39 @@
 | 카모 배경 텍스처 | `--camo-olive` 5% opacity |
 | **"학번 없음" 체크박스 (외부인 분기)** | `--color-accent` **외곽선 2px 만** (배경 transparent), 체크 시 채움. *위계*: CTA가 *채움형 형광 옐로*라 체크박스는 *선형*으로 분리 (UX-2 정보 위계 보호) |
 
-### 4.3 대비 검증 (WCAG AA)
+### 4.3 대비 검증 (WCAG AA) — *2026-05-14 군복 톤 재검증 필요*
 
-다음 조합은 **AA 4.5:1 이상 보장** (운영 중 직접 검증 필요):
-- `--color-ink` on `--color-bg`: ~14:1 ✅
-- `--color-ink` on `--color-surface`: ~12:1 ✅
-- `--color-muted` on `--color-bg`: ~5:1 ✅
-- `--color-accent` (검정 텍스트) on `--color-bg`: ~13:1 ✅
-- `--color-danger` on `--color-bg`: 4.7:1 (경계) — 위험한 액션은 텍스트도 굵게
+> **🔴 시급 (D-7 이번 주)**: 2026-05-13 군복 톤 하이브리드 컬러 베이스 변경 후 대비 검증 재실행 미완. 디자이너·개발자가 *온라인 대비 검사기* (WebAIM Contrast Checker 등)로 실측 후 본 표 갱신 필요.
+
+**페이지 베이스 (군복 톤) — 실측 대상:**
+
+| 조합 | 추정 대비 | 검증 결과 |
+|---|---|---|
+| `--color-ink (#E8E0C8)` on `--color-bg (#2E3A26)` | ~9:1 (추정) | ⏳ 실측 필요 |
+| `--color-ink` on `--color-surface (#3A4A2E)` | ~7:1 (추정) | ⏳ 실측 필요 |
+| `--color-muted (#A8A48C)` on `--color-bg` | ~4.5:1 (경계 추정) | ⏳ 실측 필요 — 미달 시 명도 ↑ |
+| `--color-accent (#F4D200)` on `--color-bg` (검정 텍스트) | ~10:1 (추정) | ⏳ 실측 필요 |
+| `--color-danger (#C73E1D)` on `--color-bg` | ~3:1 (경계 추정) | ⏳ 실측 필요 — 미달 시 큰 텍스트만 사용 |
+
+**카드 영역 (밝은 흙색) — 실측 대상:**
+
+| 조합 | 추정 대비 | 검증 결과 |
+|---|---|---|
+| `--color-card-ink (#2A2820)` on `--color-card-bg (#C8B894)` | ~10:1 (추정) | ⏳ 실측 필요 |
+| `--color-card-muted (#5C5040)` on `--color-card-bg` | ~4.5:1 (경계 추정) | ⏳ 실측 필요 |
+| `--color-accent (#F4D200)` on `--color-card-bg` (검정 텍스트) | ~7:1 (추정) | ⏳ 실측 필요 |
+| `--stamp-red (#B5301A)` on `--color-card-bg` | ~5:1 (추정) | ⏳ 실측 필요 |
+
+**검증 절차:**
+1. 디자이너 또는 개발자가 WebAIM Contrast Checker 또는 Chrome DevTools "검색 → 색상 대비" 사용
+2. 각 조합에 대해 실제 hex 값 입력 → 대비비 확인
+3. 4.5:1 미달 시 *명도 조정* (예: ink를 더 밝게, muted를 더 어둡게)
+4. 본 표의 ⏳를 ✅/⚠️로 갱신
+5. 미달 조합은 *대안 컬러* 명시 (예: 큰 텍스트만 허용, 또는 배경 변경)
+
+**기존 라이트 default 기준 (2026-05-10, 보조 모드 검토용):**
+- `--color-ink-light (#2A2C20)` on `--color-bg-light (#F5EFE0)`: ~14:1 ✅
+- 본 라이트 모드는 *운영진 사이드 PC 데이터 밀도용 검토* (1차 운영 후, §4.1 참조)
 
 ---
 
@@ -443,15 +468,47 @@ Pretendard Variable은 100-900 모두 지원. 다른 weight 사용 권장 X.
 - ❌ 호버 시 카드 8px+ 들리는 효과 (배민 톤 X)
 - ❌ scroll-driven 애니메이션 (모바일 멀미)
 
-### 9.5 reduced motion 지원
+### 9.5 reduced motion 지원 — *2026-05-14 신규 모션 5종 명시*
 
 ```css
 @media (prefers-reduced-motion: reduce) {
-  /* 모든 애니메이션 → 0.01ms (즉시) */
-  /* 도그태그 모션 제거 */
-  /* 마스코트 표정 변화는 cross-fade 없이 즉시 */
+  /* 기존 모션 */
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  /* 도그태그 모션 제거 (떨어짐·회전 X) */
+  .dog-tag { animation: none; transform: none; }
+
+  /* 마스코트 cross-fade 없이 즉시 변형 */
+  .mascot-state { transition: none; }
+
+  /* 마스코트 idle 흔들 제거 (조리 중) */
+  .mascot-cooking-idle { animation: none; }
+
+  /* 2026-05-14 신규 — 본 검토 식별 */
+
+  /* 본인 테이블 펄스 (미니맵, COMPONENT §4.12) */
+  /* → static box-shadow + 형광 옐로 강조만 (animation X) */
+  .table-mine { animation: none; box-shadow: 0 0 0 3px var(--color-accent); }
+
+  /* StartBusinessCTA 빨간 깜박 (CLOSED + 16:30 이후 5분+) */
+  /* → static 빨간 border 강조만 */
+  .start-business-cta--urgent { animation: none; border-color: var(--color-danger); }
+
+  /* 모달 진입 fade + slide 200ms */
+  /* → 즉시 표시 (0.01ms) */
+  .modal-enter { transition: none; }
+
+  /* 도장 찍힘 모션 (StampBadge) */
+  /* → 정적 표시 (scale·rotate 없음, 색상만) */
+  .stamp { animation: none; transform: rotate(0); }
 }
 ```
+
+**철학:** 멀미·VR 어지러움 사용자를 위해 *animation·transition만 제거*하되 *시각 강조 (border·box-shadow·색상)는 보존*. 정보 손실 없이 *동적 요소만* 정적으로.
 
 ---
 
@@ -479,7 +536,8 @@ default·완료      이체 확인 직후       COOKING 단계         READY·DO
 | 조리 현황판 READY/DONE 단계 | 도착 |
 | 조리 현황판 CANCELED 단계 | 취소 |
 | 404·500 에러 화면 | 취소 + "임무 실패!" 카피 |
-| 운영진 화면 (대시보드 등) | **사용 금지** (정보 밀도 우선) |
+| **C-9 영업 외 안내 화면 (G13 신규, 2026-05-14)** | **기본 변형** + "🔒 영업 시간이 아니에요" 카피 |
+| 운영진 화면 (대시보드 등) | **사용 금지** (정보 밀도 우선 — StartBusinessCTA·BusinessStateBadge에 마스코트 X) |
 
 ### 10.3 크기
 
@@ -618,6 +676,10 @@ YES면 진행. NO면 위 20가지 중 어느 것을 밟았는지 점검.
 | **2026-05-13** | **부스 미니맵 모달 신규 (G12)** | **PUBG 미니맵 톤 풀스크린 모달. 메뉴·완료 화면 🗺️ 진입** |
 | **2026-05-13** | **영업 외 안내 화면 신규 (G13 /closed)** | **CLOSED 상태 풀스크린 안내. 마스코트 + 운영 일정** |
 | **2026-05-13** | **AI 슬롭 패턴 25개로 확장 (PUBG 톤 특화 5개 추가)** | **PUBG 직접 복제·메뉴 리스킨 과잉·자동 모달 등** |
+| **2026-05-14** | **§4.3 대비 검증 플레이스홀더 표 — 군복 톤 하이브리드 기준 실측 필요 (D-7 시급)** | `/plan-design-review` 2차 |
+| **2026-05-14** | **§9.5 reduced motion 신규 모션 5종 처리 명시** (본인 테이블 펄스·StartBusinessCTA 깜박·모달 fade·도장 찍힘·마스코트 idle) | `/plan-design-review` 2차 |
+| **2026-05-14** | **§10.2 마스코트 사용 위치 — C-9 영업 외 안내 추가** | `/plan-design-review` 2차 |
+| **2026-05-14** | **4건 시급 미정 결정 식별** — (d) 군복 톤 대비 / (e) 미니맵 모바일 하단 닫기 / (f) "줍기" 클릭 영역 / (h) sessionStorage 규약 | `/plan-design-review` 2차 DESIGN_REVIEW.md §2-5 |
 
 ---
 
