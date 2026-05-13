@@ -250,6 +250,8 @@ CREATE INDEX idx_order_items_menu  ON order_items(menu_id);
 CREATE TABLE used_coupons (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   student_id  TEXT NOT NULL UNIQUE,                 -- 학번당 1회 (축제 전체)
+  -- 2026-05-13 변경 (ADR-019): prefix '202637' → 학과 코드 '37' 매칭 (위치 5-6)
+  -- 검증 정규식 ^\d{2}\d{2}37\d{3}$ — 애플리케이션 레이어 (CHECK 제약 미사용)
   name        TEXT NOT NULL,
   order_id    INTEGER NOT NULL REFERENCES orders(id),
   discount    INTEGER NOT NULL,
@@ -312,7 +314,15 @@ CREATE TABLE admins (
 );
 ```
 
-운영 시 `node scripts/admin-add.js admin <pin>` 같은 CLI로 등록 (Phase 2면 관리자 UI에 'PIN 변경' 추가).
+**어드민 자동 시드 (2026-05-13 신규, init.sql 동작):**
+
+- 첫 부팅 시 `db/bootstrap.js`가 `admins` 테이블 빈 상태 감지
+- 환경변수 `DEFAULT_ADMIN_PIN` 명시 시 → 해당 PIN을 scrypt 해시로 INSERT (`username='admin'`, `role='super_admin'`)
+- `DEFAULT_ADMIN_PIN` 미명시 시 → 6자리 랜덤 PIN 생성 + scrypt 해시 INSERT + **stdout 1회 출력** (`[INIT] Generated admin PIN: 482917 — 운영 시작 전 변경 권장`)
+- 재부팅 시 admins 테이블에 행 있으면 시드 skip
+- 추가 admin: CLI `node scripts/admin-add.js <username> <pin>` 또는 Phase 2 UI
+
+자세한 흐름은 `docs/ARCHITECTURE.md` §6.5 및 §8.5 참조.
 
 ### 2.9 `admin_sessions` (`connect-sqlite3`가 자동 생성)
 
@@ -385,6 +395,54 @@ CREATE TABLE _migrations (
 ```
 
 부팅 시 `db/migrations/*.sql`을 정렬해 미적용분 실행 + 이 테이블에 기록.
+
+### 2.13 `business_state` ★ G13 신규 (2026-05-13)
+
+> 영업 상태 단일 행 토글 테이블. 관리자 "장사 시작"으로 OPEN, 정산 마감으로 자동 CLOSED.
+
+```sql
+CREATE TABLE business_state (
+  id              INTEGER PRIMARY KEY CHECK (id = 1),    -- 단일 행 강제
+  status          TEXT NOT NULL CHECK (status IN ('CLOSED', 'OPEN')),
+  operating_date  TEXT,                                  -- 'YYYY-MM-DD', OPEN 시 today
+  opened_at       TEXT,                                  -- 'YYYY-MM-DD HH:MM:SS'
+  closed_at       TEXT,
+  opened_by       INTEGER REFERENCES admins(id),         -- 누가 열었는지 추적
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- init.sql 시드: status='CLOSED' 단일 행
+INSERT INTO business_state (id, status) VALUES (1, 'CLOSED');
+```
+
+**불변식 (애플리케이션 레이어):**
+- `status='OPEN'`이면 `operating_date IS NOT NULL` AND `opened_at IS NOT NULL`
+- 정산 마감 트리거 시 `status='CLOSED'` + `closed_at` 갱신 **같은 트랜잭션**
+- 두 번째 행 INSERT 시도는 `CHECK (id = 1)` 위반으로 거부
+
+### 2.14 `system_settings` ★ G14 신규 (2026-05-13)
+
+> 운영 중 변경되는 단순 key-value 설정. 일자별 주문번호 시퀀스 등.
+
+```sql
+CREATE TABLE system_settings (
+  key         TEXT PRIMARY KEY,
+  value       TEXT NOT NULL,
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- init.sql 시드 (G14 일회성 운영 일정 — 5/20·5/21만)
+INSERT INTO system_settings (key, value) VALUES
+  ('operating_dates', '2026-05-20,2026-05-21'),
+  ('business_open_time', '16:30'),
+  ('auto_snapshot_interval_min', '120'),
+  ('auto_snapshot_rotate', '6');
+```
+
+**용도:**
+- 주문번호 일자별 reset 시퀀스 (Phase 2 — 현재는 orders 테이블 daily_no가 처리)
+- 운영 가이드 설정 (`.env`와 중복 가능 — `.env`가 우선)
+- 1차 운영 후 변경할 수 있는 *런타임 설정*
 
 ---
 
@@ -489,34 +547,84 @@ ORDER BY hour;
 
 ## 5. 마이그레이션 전략
 
-### 5.1 파일 구조
+### 5.1 파일 구조 — *2026-05-13 갱신*
 
 ```
-db/migrations/
-├── 001-init.sql            # 모든 테이블 + 인덱스 + 초기 카테고리 데이터
-├── 002-?                   # 1차 운영 후 변경 시 추가
-└── ...
+src/db/
+├── bootstrap.js            # 부팅 시 init 또는 마이그레이션 결정
+├── init.sql                # ★ 신규 DB 첫 부팅 시 전체 스키마 + 시드 (§5.5)
+└── migrations/
+    ├── 001-init.sql        # init.sql과 동일 본문 (마이그 추적 첫 행)
+    ├── 002-?               # 1차 운영 후 변경 시 추가 (운영 중 권장 X)
+    └── ...
 ```
 
-### 5.2 부팅 시 적용
+**init.sql vs migrations 분리 (사용자 요구 2026-05-13):**
+
+- 사용자 명시: "서버 시작 시 init.sql이 작동해서 DB 구성"
+- 신규 DB (volume 비어있음) → `init.sql` 단일 실행 (모든 CREATE TABLE + 시드)
+- 기존 DB (volume에 db.sqlite 존재) → `migrations/` 미적용분만 실행
+- 첫 부팅 후 `_migrations` 테이블에 `'001-init.sql'` 행 INSERT (재실행 방지)
+
+### 5.2 부팅 시 적용 — *2026-05-13 갱신 (init.sql 흐름 추가)*
 
 ```javascript
-// db/connection.js (의사코드)
+// src/db/bootstrap.js (의사코드)
+async function bootstrap(db) {
+  // ① _migrations 테이블 존재 여부 = "기존 DB인지 신규 DB인지" 판단
+  const isNew = !tableExists(db, '_migrations');
+
+  if (isNew) {
+    // 신규 DB: init.sql 일괄 실행 (모든 CREATE TABLE + 인덱스 + 시드)
+    const sql = fs.readFileSync('src/db/init.sql', 'utf-8');
+    db.exec('BEGIN');
+    try {
+      db.exec(sql);
+      db.prepare(`INSERT INTO _migrations (filename) VALUES (?)`)
+        .run('001-init.sql');
+      db.exec('COMMIT');
+      logger.info('[bootstrap] Fresh DB created via init.sql');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+
+    // ② 어드민 시드 (별도 트랜잭션, scrypt 해시는 JS에서)
+    await seedAdmin(db);
+  } else {
+    // 기존 DB: migrations/ 미적용분만 실행
+    await runMigrations(db);
+  }
+}
+
+async function seedAdmin(db) {
+  // admins 테이블 비어있으면 시드 (재부팅 시 skip)
+  const count = db.prepare('SELECT COUNT(*) as n FROM admins').get().n;
+  if (count > 0) return;
+
+  const pin = process.env.DEFAULT_ADMIN_PIN || generateRandomPin(6);
+  const pinHash = await scrypt(pin, generateSalt(), 64);
+  db.prepare(`INSERT INTO admins (username, pin_hash, role)
+              VALUES ('admin', ?, 'super_admin')`)
+    .run(pinHash.toString('hex'));
+
+  if (!process.env.DEFAULT_ADMIN_PIN) {
+    logger.info(`[INIT] Generated admin PIN: ${pin} — 운영 시작 전 변경 권장`);
+  }
+}
+
 function runMigrations(db) {
-  db.exec(`CREATE TABLE IF NOT EXISTS _migrations (
-    filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-  )`);
-  const files = fs.readdirSync('db/migrations').filter(f => f.endsWith('.sql')).sort();
+  const files = fs.readdirSync('src/db/migrations').filter(f => f.endsWith('.sql')).sort();
   const applied = new Set(db.prepare('SELECT filename FROM _migrations').all().map(r => r.filename));
   for (const f of files) {
     if (applied.has(f)) continue;
-    const sql = fs.readFileSync(`db/migrations/${f}`, 'utf-8');
+    const sql = fs.readFileSync(`src/db/migrations/${f}`, 'utf-8');
     db.exec('BEGIN');
     try {
       db.exec(sql);
       db.prepare('INSERT INTO _migrations (filename) VALUES (?)').run(f);
       db.exec('COMMIT');
-      console.log(`[migration] applied ${f}`);
+      logger.info(`[migration] applied ${f}`);
     } catch (e) {
       db.exec('ROLLBACK');
       throw e;
@@ -524,6 +632,8 @@ function runMigrations(db) {
   }
 }
 ```
+
+**호출:** `server.js`에서 `app.listen()` 직전에 `await bootstrap(db)`. 실패 시 `process.exit(1)` → Docker `restart: always`가 재시도.
 
 ### 5.3 PRAGMA 설정
 
@@ -544,6 +654,69 @@ db.pragma('busy_timeout = 5000');          // 5초 대기 후 SQLITE_BUSY
 4. `docker compose up -d --build` (재가동 시 자동 적용)
 
 > **운영 중 메뉴 가격 변경 금지** (ADR-020 해설). 변경 직후 주문이 새 가격, 직전 주문이 옛 가격 → 정산 혼란.
+
+### 5.5 `init.sql` 본문 — *2026-05-13 신규*
+
+> 신규 DB 첫 부팅 시 전체 스키마 + 초기 시드. 사용자 요구로 *단일 SQL 파일*로 통합.
+
+```sql
+-- src/db/init.sql
+-- 신규 DB 첫 부팅 시 전체 스키마 + 시드 데이터
+-- 호출자: src/db/bootstrap.js
+
+PRAGMA foreign_keys = ON;
+
+-- ─── 마이그레이션 추적 ────────────────────────────────────
+CREATE TABLE _migrations (
+  filename    TEXT PRIMARY KEY,
+  applied_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ─── 도메인 핵심 테이블 (§2 정의 그대로) ───────────────────
+-- (CREATE TABLE menu_categories, menus, orders, order_items,
+--  used_coupons, rejected_coupons, order_events, admins,
+--  admin_sessions, settlement_snapshots, backup_downloads,
+--  business_state, system_settings — §2.1-§2.14 정의 그대로 INSERT)
+
+-- ─── 모든 인덱스 (§3 정의 그대로) ─────────────────────────
+-- (CREATE INDEX ... 전체)
+
+-- ─── 초기 시드 데이터 ─────────────────────────────────────
+
+-- 메뉴 카테고리 (G10 8개 메뉴 = 3 카테고리)
+INSERT INTO menu_categories (slug, name, display_order) VALUES
+  ('chicken', '치킨', 1),
+  ('side',    '사이드', 2),
+  ('drink',   '음료', 3);
+
+-- 메뉴 8개 고정 (G10) — 가격은 사용자 확정 후 UPDATE 또는 마이그레이션
+INSERT INTO menus (slug, name, category_id, price, is_recommended, is_soldout) VALUES
+  ('fried',           '후라이드',         1, 18000, 1, 0),
+  ('seasoned',        '양념',             1, 19000, 0, 0),
+  ('bbringkle',       '뿌링클',           1, 20000, 1, 0),
+  ('chilis',          '칠리스',           1, 20000, 0, 0),
+  ('fries',           '감자튀김',         2,  4000, 0, 0),
+  ('bbringkle_fries', '뿌링감자튀김',     2,  5000, 0, 0),
+  ('cola',            '콜라',             3,  2000, 0, 0),
+  ('cider',           '사이다',           3,  2000, 0, 0);
+
+-- 영업 상태 단일 행 (G13)
+INSERT INTO business_state (id, status) VALUES (1, 'CLOSED');
+
+-- 시스템 설정 (G14)
+INSERT INTO system_settings (key, value) VALUES
+  ('operating_dates',           '2026-05-20,2026-05-21'),
+  ('business_open_time',        '16:30'),
+  ('auto_snapshot_interval_min', '120'),
+  ('auto_snapshot_rotate',       '6');
+
+-- 어드민은 init.sql에서 INSERT 안 함 (JS에서 scrypt 해시 후 INSERT, §5.2 seedAdmin)
+```
+
+**별도 처리 (init.sql 밖):**
+
+- 어드민 PIN 해시 (scrypt) → JS에서 처리 (Node crypto 모듈)
+- 운영 중 변경 (메뉴 가격·신규 admin) → 마이그레이션 파일
 
 ---
 
@@ -611,6 +784,19 @@ if (result !== 'ok') {
 ---
 
 ## 9. 변경 영향 추적
+
+### 9.0 2026-05-13 갱신 사항
+
+- **§2.5 used_coupons** — 쿠폰 학번 검증 정규식을 `prefix '202637'` → `\d{2}\d{2}37\d{3}` (학과 코드 37 매칭, ADR-019 변경)
+- **§2.8 admins** — 어드민 자동 시드 정책 추가 (DEFAULT_ADMIN_PIN env 또는 랜덤 6자리 + stdout 출력)
+- **§2.13 business_state 신규** — G13 영업 상태 단일 행 토글 테이블 (CLOSED/OPEN)
+- **§2.14 system_settings 신규** — G14 일회성 운영 일정·자동 ZIP 주기·영업 시간 설정 저장
+- **§5.1 파일 구조 갱신** — `src/db/init.sql` + `src/db/bootstrap.js` 신규 분리
+- **§5.2 부팅 흐름 갱신** — bootstrap.js의 신규/기존 DB 분기 + seedAdmin() 흐름 명세
+- **§5.5 init.sql 본문 신규** — 단일 SQL 파일로 전체 스키마 + 메뉴 8개 + 영업 상태 + 시스템 설정 시드 (사용자 요구 2026-05-13)
+- **자동 ZIP 주기** — ADR-022 변경: 30분 → 2시간 (system_settings + .env 둘 다 반영)
+- **메뉴 8개 고정** — G10: 후라이드·양념·뿌링클·칠리스·감자튀김·뿌링감자튀김·콜라·사이다 (가격은 사용자 확정 필요, 현재 init.sql 예시값)
+
 
 | 결정 (ADR) | 영향받은 테이블/컬럼 |
 |---|---|

@@ -255,19 +255,21 @@ describe('ADR-020: Pattern B 가격 무결성', () => {
 | 품절 menu_id | `[{m:1,q:1}]` (sold_out) | MenuSoldOut |
 | 미존재 menu_id | `[{m:999,q:1}]` | MenuNotFound |
 
-### 5.2 `domain/coupon-validation.js`
+### 5.2 `domain/coupon-validation.js` — *2026-05-13 갱신 (ADR-019 학과 코드 37)*
 | 케이스 | 입력 (student_id, name) | 기대 |
 |---|---|---|
-| 정상 1학년 | (`202637042`, `홍길동`) | valid |
+| 정상 컴모융 1학년 | (`202637042`, `홍길동`) | valid |
+| 정상 컴모융 4학년 | (`202337042`, `김철수`) | valid (학과 코드 37 매칭) |
+| 정상 컴모융 2학년 | (`202537042`, `이영희`) | valid |
 | 8자리 학번 | (`20263704`, `홍`) | format |
 | 10자리 학번 | (`2026370420`, `홍`) | format |
 | 알파벳 포함 | (`A02637042`, `홍`) | format |
-| 다른 학과 prefix | (`202638042`, `홍`) | prefix |
-| 4학년 prefix | (`202337042`, `홍`) | prefix |
+| 다른 학과 (위치 5-6이 38) | (`202638042`, `홍`) | department |
+| 다른 학과 (위치 5-6이 19) | (`202619042`, `홍`) | department |
 | 빈 이름 | (`202637042`, ``) | name |
 | 공백 이름 | (`202637042`, `   `) | name |
-| 이미 사용 | (`202637042`, `홍`) | duplicate |
-| 모두 OK | (`202637999`, `김철수`) | valid |
+| 이미 사용 (학번 unique) | (`202637042`, `홍`) | duplicate |
+| 모두 OK 신규 | (`201137999`, `박민수`) | valid (2011학번 + 학과 37) |
 
 ### 5.3 `domain/order-state.js`
 | from → to | actor | 기대 |
@@ -298,15 +300,17 @@ describe('ADR-020: Pattern B 가격 무결성', () => {
 | 메뉴별 집계 정확 | 동일 menu_id 합산 |
 | 시간대별 KST 변환 | UTC `created_at` → KST hour |
 
-### 5.5 `domain/popularity.js`
+### 5.5 `domain/popularity.js` — *2026-05-13 갱신 (E 결정: 정적 BEST)*
 | 케이스 | 입력 | 기대 |
 |---|---|---|
-| TOP 3 정상 | 5개 메뉴 판매 | top3 + dominant_first |
+| TOP 3 정상 | 5개 메뉴 판매 | top3 + copy="🔥 학생회 추천 BEST" |
 | 동률 1·2위 | qty 똑같음 | menu_id 작은 순 |
-| 격차 큼 (>2배) | qty:30,5,3 | dominant_first |
-| 격차 작음 (<20%) | qty:10,9,2 | close_race |
-| 데이터 부족 | 0건 | seed |
-| 신메뉴 급상승 | 최근 1시간 100% 증가 | rising |
+| 데이터 부족 | 0건 | ranking=[], copy 동일 |
+| 캐시 5분 이내 재호출 | 1초 후 재호출 | 동일 응답 (DB 쿼리 X) |
+| 캐시 5분 만료 | 5분+ 후 재호출 | 새 쿼리 + 동일 형식 |
+| ~~격차 큼 dominant_first~~ | — | **삭제 (정적 BEST 결정)** |
+| ~~격차 작음 close_race~~ | — | **삭제** |
+| ~~신메뉴 rising~~ | — | **삭제** |
 
 ### 5.6 `domain/transfer-matching.js`
 | 케이스 | 기대 |
@@ -317,6 +321,32 @@ describe('ADR-020: Pattern B 가격 무결성', () => {
 | 시각 ±5분 경계 | match=true (300초 내) |
 | 시각 5분 1초 | match=false |
 | alt_name 사용 | 비교 대상 = alt_name |
+
+### 5.7 `domain/business-state.js` ★ G13 신규 — *2026-05-13*
+| 케이스 | 입력 | 기대 |
+|---|---|---|
+| 초기 상태 = CLOSED | init.sql 직후 | status='CLOSED' |
+| CLOSED → OPEN | open(admin_id) | status='OPEN', operating_date=today, opened_at=NOW, opened_by=admin_id |
+| OPEN 중 다시 open() | open(admin_id) | 멱등 — 기존 상태 유지 또는 200 + 기존값 |
+| OPEN → CLOSED (정산 마감) | closeForSettlement() | status='CLOSED', closed_at=NOW |
+| 정산 마감 트랜잭션 ROLLBACK | settlements INSERT 실패 | business_state.status='OPEN' 유지 (트랜잭션 보장) |
+| isBusinessOpen() — CLOSED | — | false |
+| isBusinessOpen() — OPEN | — | true |
+| shouldBeOpen() — 16:30 이전 | current=16:00, date=5/20 | false |
+| shouldBeOpen() — 16:30 이후 + 운영일 | current=17:00, date=5/20 | true |
+| shouldBeOpen() — 운영일 아닌 날 | current=17:00, date=5/22 | false |
+| 두 번째 행 INSERT 시도 | INSERT INTO business_state VALUES (2, ...) | SQLite CHECK (id=1) 위반 거부 |
+
+### 5.8 `db/bootstrap.js` ★ init.sql 신규 — *2026-05-13*
+| 케이스 | 입력 | 기대 |
+|---|---|---|
+| 신규 DB | volume 비어있음 | init.sql 실행, _migrations에 '001-init.sql' INSERT, business_state 시드 |
+| 기존 DB | _migrations 존재 | init.sql skip, migrations/ 미적용분만 적용 |
+| 어드민 시드 (DEFAULT_ADMIN_PIN env) | env PIN='482917' | scrypt 해시 후 INSERT, stdout 출력 X |
+| 어드민 시드 (env 없음) | env 없음 | 랜덤 6자리 PIN 생성 + scrypt + stdout 출력 1회 |
+| 재부팅 시 어드민 재시드 안 함 | admins 테이블 1행 존재 | skip |
+| init.sql 실행 실패 (SQL 구문 오류) | 잘못된 SQL | ROLLBACK + process.exit(1) → Docker restart 재시도 |
+| init.sql 실행 부분 실패 → 전체 ROLLBACK | INSERT 중 FK 위반 | BEGIN/COMMIT 트랜잭션 보장, 부분 시드 없음 |
 
 ---
 
@@ -455,7 +485,11 @@ export default {
 | **E2E-07** | 정산 마감 가드 → 진행 주문 종결 → 마감 성공 | desktop | P0 |
 | **E2E-08** | ZIP 다운로드 → 헤더·콘텐트 검증 | desktop | P1 |
 | **E2E-09** | 관리자 PIN 로그인·세션 유지·로그아웃 | desktop | P0 |
-| **E2E-10** | 자동 스냅샷 30분 후 backups/ 디렉터리에 파일 생성 | (timer 가속) | P2 |
+| **E2E-10** | 자동 스냅샷 2시간 후 backups/ 디렉터리에 파일 생성 (timer 가속) | (timer 가속) | P2 |
+| **E2E-11** | 🚀 **장사 시작 흐름 (G13)** — CLOSED 상태 진입 → 사용자 /menu → /closed redirect → 관리자 "장사 시작" 클릭 → 사용자 새로고침 → /menu 정상 표시 | mobile + desktop | **P0** |
+| **E2E-12** | 🔒 **정산 마감 자동 CLOSED (G13)** — OPEN 상태 + 진행 주문 0건 → 관리자 "오늘 정산 마감" → business_state.status='CLOSED' 자동 → 사용자 새로고침 → /closed redirect | mobile + desktop | **P0** |
+| **E2E-13** | 🗺️ **부스 미니맵 모달 (G12)** — 메뉴 화면 우상단 🗺️ 클릭 → 풀스크린 모달 → 약도 이미지 또는 CSS 그리드 fallback → Esc로 닫기 | mobile | **P1** |
+| **E2E-14** | **init.sql 첫 부팅 (G13/G14)** — volume 비우고 docker compose up → 로그에 '[INIT] Generated admin PIN' 1회 출력 → admins 테이블 1행 → business_state.status='CLOSED' | (Docker compose) | **P1** |
 
 ### 8.3 E2E-01 스크립트 예시
 
@@ -572,6 +606,9 @@ jobs:
 | 11 | 호스트 종료 | — | — | — | Docker daemon | 노트북 점검 |
 | 12 | SNS 화면 노출 | — | — | — | 학번 매칭 | 안전 |
 | 13 | PIN 노출 | — | ✓ rate-limit | — | 30초 잠금 | 운영진 알림 |
+| **14** | 🟡 **장사 시작 누락 (G13)** | ✓ §5.7 shouldBeOpen | ✓ middleware 423 | ✓ **E2E-11** | should_be_open + status mismatch → 빨간 깜박 | 본부 대시보드 알림 |
+| **15** | 🟡 **init.sql 실패** | ✓ §5.8 ROLLBACK 케이스 | ✓ bootstrap 실패 시 process.exit | — (Docker restart로 흡수) | pino fatal + restart:always | (잠시) 응답 없음 |
+| **16** | 🟡 **영업 종료 + 정산 트랜잭션 부분 실패** | ✓ §5.7 ROLLBACK 케이스 | ✓ settlements rollback 시 business_state 유지 | — | BEGIN/COMMIT 트랜잭션 | 안내 |
 
 **Critical gap 0건** — 각 실패 모드는 *최소 한 가지 방어 + 가시성*이 있음.
 
@@ -605,9 +642,13 @@ A와 B는 모듈이 분리돼 동시 진행 가능. C는 의존성 있어 sequen
 | ADR | 테스트 책임 |
 |---|---|
 | ADR-015 SSE | §7 SSE 통합, E2E-05 |
-| ADR-019 쿠폰 prefix | §5.2, E2E-03 |
+| ADR-019 쿠폰 prefix (~~202637~~) | ~~§5.2~~ → **2026-05-13 갱신: 학과 코드 37 정규식 (§5.2 갱신, E2E-03 갱신)** |
 | ADR-020 가격 무결성 | §4 4 케이스 (★ 핵심), §5.1 |
 | ADR-021 학번+이름 필수 | §5.2, §6 통합, E2E-01·02 |
-| ADR-022 자동 스냅샷 | §5 jobs, E2E-10 |
+| ADR-022 자동 스냅샷 (~~30분~~ → 2시간) | §5 jobs, E2E-10 (timer 가속) |
 | ADR-023 Docker | E2E `webServer` config |
 | ADR-018 다일 운영 | §11 daily_no 회귀 |
+| **2026-05-13 ADR-017 변경** (정적 BEST) | **§5.5 갱신 — 동적 카피 케이스 삭제** |
+| **2026-05-13 G12** (부스 미니맵 모달) | **E2E-13 신규** |
+| **2026-05-13 G13** (영업 토글) | **§5.7 business-state 신규 단위, §5.8 bootstrap 신규 단위, E2E-11 장사 시작, E2E-12 자동 CLOSED, E2E-14 init.sql 부팅, §12 실패 모드 #14·#15·#16 신규** |
+| **2026-05-13 G14** (일회성) | **자동 스케줄링 X — 양일 각각 "장사 시작" 클릭 E2E-11 가정** |

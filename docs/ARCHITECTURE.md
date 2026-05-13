@@ -474,7 +474,9 @@ function calculate(items, couponCode, menuSnapshot) {
  */
 function validate(student_id, name, used_coupons_repo) {
   if (!/^\d{9}$/.test(student_id)) return { valid: false, reason: 'format' };
-  if (!student_id.startsWith('202637')) return { valid: false, reason: 'prefix' };
+  // 2026-05-13 변경 (ADR-019): 학번 prefix '202637' → 학과 코드 '37' (위치 5-6) 매칭
+  // 컴모융 전 학년 대상 (1학년만이 아닌)
+  if (!/^\d{2}\d{2}37\d{3}$/.test(student_id)) return { valid: false, reason: 'department' };
   if (!name || name.trim().length < 1) return { valid: false, reason: 'name' };
   if (used_coupons_repo.exists(student_id)) return { valid: false, reason: 'duplicate' };
   return { valid: true };
@@ -482,6 +484,51 @@ function validate(student_id, name, used_coupons_repo) {
 ```
 
 거부 시 IP rate-limit 적용 (§13.5: 같은 IP 5회 초과 → 일시 잠금).
+
+### 5.4 영업 상태 (BusinessState) — *2026-05-13 G13 신규*
+
+> 주문 상태 머신(§5.1)과 *직교*. 시스템 전체 영업 시각 토글.
+
+```
+┌────────────────────────────────────────────┐
+│ BusinessState (단일 행 — id=1 강제)         │
+├────────────────────────────────────────────┤
+│ id              : INTEGER PK CHECK (id = 1) │
+│ status          : 'CLOSED' | 'OPEN'         │
+│ operating_date  : TEXT? (YYYY-MM-DD, OPEN시) │
+│ opened_at       : DATETIME? (현재 OPEN 시각) │
+│ closed_at       : DATETIME? (마지막 CLOSED) │
+│ opened_by       : INTEGER? FK admins(id)    │
+└────────────────────────────────────────────┘
+```
+
+**상태 머신 (2-state):**
+
+```
+[CLOSED]  (default — 시스템 가동 직후, init.sql로 1행 시드)
+   │
+   │ POST /admin/api/business/open
+   │ → status='OPEN', operating_date=TODAY, opened_at=NOW
+   ▼
+[OPEN]   (사용자 주문 가능)
+   │
+   │ POST /admin/api/settlement/close (ADR-012 가드 통과)
+   │ → settlements INSERT + status='CLOSED' (트랜잭션 1개)
+   │ → closed_at=NOW
+   ▼
+[CLOSED]
+```
+
+**불변식:**
+- `business_state` 테이블은 *항상 1행만* (id=1 CHECK)
+- `status='OPEN'`이면 `operating_date IS NOT NULL` AND `opened_at IS NOT NULL`
+- `status='CLOSED'`이면 `closed_at IS NOT NULL` (단 init 직후는 NULL 허용)
+- 정산 마감 트리거 시 **OPEN → CLOSED 전이는 정산 스냅샷과 같은 트랜잭션** (원자성 보장)
+
+**사용처:**
+- middleware/business-state.js — 모든 사용자 GET 경로에서 CLOSED 시 `/closed` redirect, POST API는 HTTP 423
+- routes/admin-business.js — `POST /admin/api/business/open` 라우트
+- services/settlement.js — 정산 마감 시 같은 트랜잭션에서 `status='CLOSED'` UPDATE
 
 ---
 
@@ -557,6 +604,70 @@ POST /admin/logout         ───▶ req.session.destroy()
 - `Content-Security-Policy`: 인라인 script는 Alpine.js만 허용 (`'unsafe-eval'` 미허용)
 - `Referrer-Policy`: same-origin
 
+### 6.5 어드민 계정 자동 생성 (init.sql) — *2026-05-13 신규*
+
+> 사용자 요구: "서버 시작 시 init.sql이 작동하여 DB 구성. DB 구성 시 어드민 계정 자동 생성."
+
+**흐름:**
+
+```
+서버 부팅 (Node 프로세스 시작, server.js)
+   │
+   ▼
+db/bootstrap.js
+   │
+   │ ① business_state 행 존재 확인 (id=1)
+   │ ② _migrations 테이블 존재 확인
+   │
+   ├─[양쪽 모두 존재]─▶ 기존 DB. 마이그레이션만 적용 후 정상 부팅
+   │
+   └─[하나라도 없음]──▶ 신규 DB. init.sql 실행 (db/init.sql)
+                          │
+                          │ ① 모든 CREATE TABLE
+                          │ ② 모든 CREATE INDEX
+                          │ ③ business_state 시드 (status='CLOSED')
+                          │ ④ admins 시드 — DEFAULT_ADMIN_PIN 환경변수 또는 랜덤 생성
+                          │ ⑤ _migrations 테이블에 init 기록
+                          │
+                          ▼
+                       INSERT INTO admins VALUES (
+                         'admin',
+                         scrypt(env.DEFAULT_ADMIN_PIN || random_pin()),
+                         'super_admin'
+                       )
+                          │
+                          ▼
+                       랜덤 생성 시 stdout으로 1회 출력
+                       (운영 가이드: docker compose logs로 확인)
+```
+
+**어드민 시드 정책:**
+
+| 환경변수 | 동작 |
+|---|---|
+| `DEFAULT_ADMIN_PIN` 명시 (.env) | 해당 PIN을 scrypt 해시로 저장. 6-12자리 숫자 권장 |
+| `DEFAULT_ADMIN_PIN` 미명시 | 6자리 랜덤 PIN 생성 + scrypt 해시 저장 + **stdout으로 1회 출력** (`[INIT] Generated admin PIN: 482917 — 운영 시작 전 변경 권장`) |
+
+**보안 고려:**
+- 평문 PIN 환경변수 → scrypt 해시 후 즉시 GC. 메모리에 평문 잔존 X
+- 랜덤 PIN stdout 출력은 *최초 부팅 1회*만 (마이그레이션에 기록 후 두 번째 부팅 X)
+- 운영진은 D-1 리허설 시 PIN 변경 (관리자 페이지 `/admin/pin/change` Phase 2 또는 SQL 수동 UPDATE)
+- 컨테이너 로그(`docker compose logs chickenedak`)가 운영진 외 접근 가능하면 PIN 노출 위험 → `.env`에 명시 설정 권장
+
+**복수 admin 시드 (선택, ADR-024 §11 admin role):**
+
+`.env`의 `ADMIN_SEEDS` JSON 배열로 여러 admin 동시 생성:
+
+```env
+ADMIN_SEEDS=[
+  {"username":"admin","pin":"482917","role":"super_admin"},
+  {"username":"hub","pin":"112233","role":"hub"},
+  {"username":"kitchen","pin":"445566","role":"kitchen"}
+]
+```
+
+MVP는 단일 `admin` super_admin만 시드. 복수 admin은 Phase 2.
+
 ---
 
 ## 7. 실패 시나리오
@@ -576,6 +687,9 @@ POST /admin/logout         ───▶ req.session.destroy()
 | 11 | 호스트 노트북 강제 종료 (배터리·전원) | 전체 다운 | Docker daemon 재가동 시 컨테이너 자동 부팅 | 노트북 충전기 점검·UPS 권장 |
 | 12 | 사용자가 주문번호·학번 적힌 화면 캡처 SNS 공유 | 타인 조회 위험 | 학번 매칭이라 학번을 모르면 조회 불가. 외부인은 토큰이라 토큰 길이로 보호 | 안내 |
 | 13 | 운영진 PIN 노출 | 무단 관리자 접근 | 즉시 PIN 교체 (super_admin이) + 세션 모두 무효화 | 운영진 회의 |
+| **14** | 🟡 **장사 시작 누락 (G13)** | 16:30 오픈 후 사용자가 "영업 시간 아님" 안내만 봄 | 본부 대시보드 CLOSED 상태 + 16:30 이후 5분+ 시 빨간 깜박 + 알림 음 | 운영진 폰 알람 16:25 + 16:30 + D-1 리허설 체크리스트 #1 |
+| **15** | 🟡 **init.sql 실패 (DB 초기화 실패)** | 첫 부팅 시 컨테이너 크래시 루프 | server.js 전역 try/catch + pino fatal 로그 + `process.exit(1)` → Docker `restart: always`로 재시도 (3회 후 운영진 개입) | `docker compose logs`로 SQL 에러 확인. SQL 구문 오류면 코드 수정 후 재배포 |
+| **16** | 🟡 **정산 마감 + 영업 종료 트랜잭션 부분 실패** | settlements INSERT 성공 + business_state UPDATE 실패 | **단일 트랜잭션 강제** (BEGIN/COMMIT). 한쪽이 실패하면 ROLLBACK | 코드 검증 — 트랜잭션 누락 X 회귀 케이스 |
 
 **Critical gap 0건** — 모두 시스템 또는 운영 절차로 대응됨.
 
@@ -619,10 +733,13 @@ services:
       NODE_ENV: production
       PORT: 3000
       SESSION_SECRET: ${SESSION_SECRET}      # .env 파일
-      ADMIN_PINS: ${ADMIN_PINS}              # JSON 배열의 해시
-      AUTO_SNAPSHOT_INTERVAL_MIN: 30
+      DEFAULT_ADMIN_PIN: ${DEFAULT_ADMIN_PIN}  # 미지정 시 6자리 랜덤 (stdout 출력)
+      AUTO_SNAPSHOT_INTERVAL_MIN: 120        # 2026-05-13 A 결정: 30 → 120 (2시간)
+      AUTO_SNAPSHOT_ROTATE: 6                # 12시간 보존창
+      OPERATING_DATES: "2026-05-20,2026-05-21"  # G7 양일 운영 일정 (G14 일회성)
+      BUSINESS_OPEN_TIME: "16:30"            # 영업 시작 권장 시각 (실제는 G13 관리자 클릭)
     volumes:
-      - chickenedak-data:/app/data
+      - chickenedak-data:/app/data           # init.sql은 이미지에 포함되어 첫 부팅 시 실행
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
       interval: 30s
@@ -644,16 +761,101 @@ volumes:
 | Volume 백업 | `docker run --rm -v chickenedak-data:/data alpine tar czf - /data > backup-YYYYMMDD.tar.gz` |
 | 종료 | `docker compose down` (volume은 유지) |
 
-### 8.4 환경변수 (`.env`)
+### 8.4 환경변수 (`.env`) — *2026-05-13 갱신*
 
 ```
+# 필수
 SESSION_SECRET=<32+ random hex>
-ADMIN_PINS=[{"username":"admin","scrypt":"<hash>"},{"username":"hub","scrypt":"<hash>"}]
-AUTO_SNAPSHOT_INTERVAL_MIN=30
+
+# 선택 (어드민 자동 생성용)
+DEFAULT_ADMIN_PIN=482917             # 미지정 시 첫 부팅 stdout에 6자리 랜덤 출력
+# ADMIN_SEEDS=[{...},{...}]          # 복수 admin 시드 (Phase 2)
+
+# ZIP 스냅샷 (A 결정: 30 → 120)
+AUTO_SNAPSHOT_INTERVAL_MIN=120
+AUTO_SNAPSHOT_ROTATE=6
+
+# 운영 일정 (G7 + G14 일회성)
+OPERATING_DATES=2026-05-20,2026-05-21
+BUSINESS_OPEN_TIME=16:30
+
+# 로깅
 LOG_LEVEL=info
 ```
 
 `.env`는 `.gitignore`에 포함. 운영 시 호스트 노트북에 직접 작성·보관.
+
+### 8.5 init.sql 부팅 흐름 — *2026-05-13 신규 G13*
+
+> 사용자 요구: "서버 시작 시 init.sql이 작동해서 DB 구성. 어드민 계정 자동 생성."
+
+**파일 위치:**
+
+```
+src/
+  server.js                  # Express 부팅 진입점
+  db/
+    bootstrap.js             # ① init.sql 또는 마이그레이션 적용 결정
+    init.sql                 # ★ 신규 DB 첫 부팅 시 전체 스키마 + 시드
+    migrations/
+      001_initial.sql        # init.sql과 동일 내용 (마이그 추적용 첫 행)
+      002_*.sql              # 이후 변경분 (Phase 2 이상)
+```
+
+**부팅 순서 (server.js):**
+
+```javascript
+// server.js 의사 코드
+const db = require('./db/bootstrap');
+
+async function main() {
+  await db.bootstrap();           // ① init.sql or migrations
+  // → 이때 business_state·admins 시드도 자동
+  app.listen(PORT);
+}
+
+main().catch(err => {
+  logger.fatal({err}, 'Bootstrap failed');
+  process.exit(1);                // Docker restart:always가 재시도
+});
+```
+
+**db/bootstrap.js 의사 코드:**
+
+```javascript
+async function bootstrap() {
+  const dbExists = await checkTableExists('_migrations');
+  if (!dbExists) {
+    // 신규 DB: init.sql 실행 (CREATE TABLE * + INSERT 시드)
+    const sql = fs.readFileSync('db/init.sql', 'utf8');
+    db.exec(sql);
+
+    // 어드민 시드 (별도 트랜잭션, scrypt 해시는 JS에서)
+    const pin = process.env.DEFAULT_ADMIN_PIN || generateRandomPin(6);
+    const pinHash = await scrypt(pin, salt);
+    db.prepare(`INSERT INTO admins (username, pin_hash, role)
+                VALUES ('admin', ?, 'super_admin')`).run(pinHash);
+
+    if (!process.env.DEFAULT_ADMIN_PIN) {
+      logger.info(`[INIT] Generated admin PIN: ${pin} — 운영 시작 전 변경 권장`);
+    }
+  } else {
+    // 기존 DB: 마이그레이션 적용
+    await applyPendingMigrations();
+  }
+}
+```
+
+**Docker volume 보존 (ADR-023):**
+
+- `chickenedak-data` named volume에 `db.sqlite` 저장
+- 첫 부팅: volume 비어있음 → `db.sqlite` 신규 생성 → init.sql 실행
+- 재부팅: volume에 `db.sqlite` 존재 → bootstrap.js가 `_migrations` 확인 → init.sql 건너뜀
+- `docker compose down -v` 또는 volume 삭제 시 다음 부팅에서 init.sql 재실행 (개발용 reset)
+
+**SQL 본문:** `docs/DB_DRAFT.md` §5 마이그레이션 전략의 init.sql 정의 참조.
+
+---
 
 ---
 
@@ -739,9 +941,21 @@ Docker volume `chickenedak-data` (호스트 경로 = `/var/lib/docker/volumes/..
 
 다음 단계 (`order-system-plan.md` 부록 B에 따라):
 
-1. **자료 수령**: 부스 약도, 메뉴 이미지, 계좌번호·예금주
+1. **자료 수령**: 부스 약도(G12 미니맵용), 메뉴 이미지 8종, ~~계좌번호·예금주~~ (G9 확보됨: 국민은행 233001-04-403536 박동빈)
 2. **디자인 톤 시안** (`/design-consultation` 또는 `/plan-design-review`)
 3. **본 ARCHITECTURE.md 검토 + 수정** ← 사용자 검토 단계
 4. **사용자가 "구현 시작" 신호**
 5. `/superpowers:writing-plans` → 구현 단계 분할
 6. `/superpowers:test-driven-development` → 구현
+
+### 변경 영향 추적 (2026-05-13 반영)
+
+- **§5.4 영업 상태 (BusinessState) 신규** — G13 영업 토글 도메인 모델
+- **§6.5 어드민 자동 생성 신규** — 사용자 요구 신규 명세 (init.sql 기반)
+- **§7 실패 시나리오 #14·#15·#16 추가** — 장사 시작 누락·init.sql 실패·트랜잭션 부분 실패
+- **§8.2 docker-compose.yml 환경변수 갱신** — AUTO_SNAPSHOT 30 → 120, DEFAULT_ADMIN_PIN, OPERATING_DATES, BUSINESS_OPEN_TIME 신규
+- **§8.4 .env 갱신** — 위 동일
+- **§8.5 init.sql 부팅 흐름 신규** — db/bootstrap.js + db/init.sql 정책 명세
+- **§5.3 쿠폰 검증 함수 정규식 갱신** — ADR-019 변경: `prefix 202637` → `\d{2}\d{2}37\d{3}`
+
+PRD G9-G14 + ADR-017/019/022/026 변경 + ADR-012 보강은 이 갱신에 모두 반영됨.
